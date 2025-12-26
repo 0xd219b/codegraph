@@ -484,3 +484,489 @@ pub fn find_references_by_symbol(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::models::{EdgeRecord, FileRecord, NodeRecord, ProjectRecord};
+    use crate::storage::Database;
+    use tempfile::TempDir;
+
+    fn setup_test_db() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        db
+    }
+
+    fn create_test_project(db: &Database) -> i64 {
+        let project = ProjectRecord {
+            id: 0,
+            name: "test-project".to_string(),
+            root_path: "/test/project".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        db.insert_project(&project).unwrap()
+    }
+
+    fn create_test_file(db: &Database, project_id: i64, path: &str, language: &str) -> i64 {
+        let file = FileRecord {
+            id: 0,
+            project_id,
+            path: path.to_string(),
+            language: language.to_string(),
+            content_hash: "test_hash".to_string(),
+            parsed_at: chrono::Utc::now(),
+        };
+        db.insert_file(&file).unwrap()
+    }
+
+    fn create_test_node(
+        db: &Database,
+        file_id: i64,
+        node_type: &str,
+        name: &str,
+        qualified_name: Option<&str>,
+        start_line: u32,
+    ) -> i64 {
+        let node = NodeRecord {
+            id: 0,
+            file_id,
+            node_type: node_type.to_string(),
+            name: name.to_string(),
+            qualified_name: qualified_name.map(|s| s.to_string()),
+            start_line,
+            start_column: 1,
+            end_line: start_line + 5,
+            end_column: 1,
+            attributes: None,
+        };
+        db.insert_node(&node).unwrap()
+    }
+
+    #[test]
+    fn test_query_executor_new() {
+        let db = setup_test_db();
+        let executor = QueryExecutor::new(db);
+        drop(executor);
+    }
+
+    #[test]
+    fn test_find_definition_not_found() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let executor = QueryExecutor::new(db);
+
+        let result = executor
+            .find_definition(project_id, "/nonexistent/file.java", 10, 5)
+            .unwrap();
+
+        assert!(!result.found);
+        assert!(result.definition.is_none());
+    }
+
+    #[test]
+    fn test_find_definition_at_position() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/UserService.java", "java");
+        create_test_node(&db, file_id, "class", "UserService", Some("com.example.UserService"), 1);
+
+        let executor = QueryExecutor::new(db);
+        let result = executor
+            .find_definition(project_id, "/test/UserService.java", 3, 1)
+            .unwrap();
+
+        assert!(result.found);
+        assert!(result.definition.is_some());
+        let def = result.definition.unwrap();
+        assert_eq!(def.name, "UserService");
+        assert_eq!(def.node_type, "class");
+    }
+
+    #[test]
+    fn test_find_references_empty() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let executor = QueryExecutor::new(db);
+
+        let result = executor
+            .find_references(project_id, "/nonexistent/file.java", 10, 5)
+            .unwrap();
+
+        assert_eq!(result.count, 0);
+        assert!(result.references.is_empty());
+    }
+
+    #[test]
+    fn test_search_symbols() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/Service.java", "java");
+
+        create_test_node(&db, file_id, "class", "UserService", Some("com.example.UserService"), 1);
+        create_test_node(&db, file_id, "method", "getUser", Some("com.example.UserService.getUser"), 10);
+        create_test_node(&db, file_id, "method", "createUser", Some("com.example.UserService.createUser"), 20);
+
+        let executor = QueryExecutor::new(db);
+        let result = executor
+            .search_symbols(project_id, "User", None, 10)
+            .unwrap();
+
+        assert!(result.count >= 2);
+        assert!(result.symbols.iter().any(|s| s.name == "UserService"));
+    }
+
+    #[test]
+    fn test_search_symbols_by_type() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/Service.java", "java");
+
+        create_test_node(&db, file_id, "class", "UserService", None, 1);
+        create_test_node(&db, file_id, "method", "getUser", None, 10);
+
+        let executor = QueryExecutor::new(db);
+
+        // Search only for methods
+        let result = executor
+            .search_symbols(project_id, "User", Some("method"), 10)
+            .unwrap();
+
+        assert_eq!(result.count, 1);
+        assert_eq!(result.symbols[0].name, "getUser");
+        assert_eq!(result.symbols[0].node_type, "method");
+    }
+
+    #[test]
+    fn test_search_symbols_with_limit() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/Service.java", "java");
+
+        for i in 0..10 {
+            create_test_node(
+                &db,
+                file_id,
+                "method",
+                &format!("testMethod{}", i),
+                None,
+                (i * 10) as u32,
+            );
+        }
+
+        let executor = QueryExecutor::new(db);
+        let result = executor
+            .search_symbols(project_id, "testMethod", None, 5)
+            .unwrap();
+
+        assert_eq!(result.count, 5);
+    }
+
+    #[test]
+    fn test_get_callgraph_symbol_not_found() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let executor = QueryExecutor::new(db);
+
+        let result = executor.get_callgraph(project_id, "nonExistentSymbol", 2, "both");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Symbol not found"));
+    }
+
+    #[test]
+    fn test_get_callgraph_basic() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/main.go", "go");
+
+        let main_id = create_test_node(&db, file_id, "function", "main", Some("main.main"), 1);
+        let helper_id = create_test_node(&db, file_id, "function", "helper", Some("main.helper"), 20);
+
+        // main calls helper
+        let edge = EdgeRecord {
+            id: 0,
+            source_id: main_id,
+            target_id: helper_id,
+            edge_type: "calls".to_string(),
+            attributes: None,
+        };
+        db.insert_edge(&edge).unwrap();
+
+        let executor = QueryExecutor::new(db);
+        let result = executor
+            .get_callgraph(project_id, "main", 1, "both")
+            .unwrap();
+
+        assert_eq!(result.center.name, "main");
+        // The callees should include helper
+        assert!(result.callees.iter().any(|c| c.name == "helper"));
+    }
+
+    #[test]
+    fn test_callgraph_direction_callers() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/main.go", "go");
+
+        let main_id = create_test_node(&db, file_id, "function", "main", Some("main.main"), 1);
+        let helper_id = create_test_node(&db, file_id, "function", "helper", Some("main.helper"), 20);
+
+        let edge = EdgeRecord {
+            id: 0,
+            source_id: main_id,
+            target_id: helper_id,
+            edge_type: "calls".to_string(),
+            attributes: None,
+        };
+        db.insert_edge(&edge).unwrap();
+
+        let executor = QueryExecutor::new(db);
+        let result = executor
+            .get_callgraph(project_id, "helper", 1, "callers")
+            .unwrap();
+
+        assert_eq!(result.center.name, "helper");
+        assert!(result.callees.is_empty());
+    }
+
+    #[test]
+    fn test_callgraph_direction_callees() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/main.go", "go");
+
+        let main_id = create_test_node(&db, file_id, "function", "main", Some("main.main"), 1);
+        let helper_id = create_test_node(&db, file_id, "function", "helper", Some("main.helper"), 20);
+
+        let edge = EdgeRecord {
+            id: 0,
+            source_id: main_id,
+            target_id: helper_id,
+            edge_type: "calls".to_string(),
+            attributes: None,
+        };
+        db.insert_edge(&edge).unwrap();
+
+        let executor = QueryExecutor::new(db);
+        let result = executor
+            .get_callgraph(project_id, "main", 1, "callees")
+            .unwrap();
+
+        assert_eq!(result.center.name, "main");
+        assert!(result.callers.is_empty());
+        assert!(result.callees.iter().any(|c| c.name == "helper"));
+    }
+
+    #[test]
+    fn test_callgraph_depth_zero() {
+        let db = setup_test_db();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/main.go", "go");
+
+        let main_id = create_test_node(&db, file_id, "function", "main", Some("main.main"), 1);
+        let helper_id = create_test_node(&db, file_id, "function", "helper", Some("main.helper"), 20);
+
+        let edge = EdgeRecord {
+            id: 0,
+            source_id: main_id,
+            target_id: helper_id,
+            edge_type: "calls".to_string(),
+            attributes: None,
+        };
+        db.insert_edge(&edge).unwrap();
+
+        let executor = QueryExecutor::new(db);
+        let result = executor
+            .get_callgraph(project_id, "main", 0, "both")
+            .unwrap();
+
+        assert_eq!(result.center.name, "main");
+        assert!(result.callers.is_empty());
+        assert!(result.callees.is_empty());
+    }
+
+    #[test]
+    fn test_definition_result_serialization() {
+        let result = DefinitionResult {
+            found: true,
+            definition: Some(SymbolLocation {
+                file: "/test/file.java".to_string(),
+                line: 10,
+                column: 5,
+                node_type: "class".to_string(),
+                name: "TestClass".to_string(),
+                qualified_name: Some("com.example.TestClass".to_string()),
+                context: None,
+            }),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: DefinitionResult = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.found);
+        assert_eq!(parsed.definition.unwrap().name, "TestClass");
+    }
+
+    #[test]
+    fn test_references_result_serialization() {
+        let result = ReferencesResult {
+            count: 1,
+            references: vec![SymbolLocation {
+                file: "/test/file.java".to_string(),
+                line: 10,
+                column: 5,
+                node_type: "reference".to_string(),
+                name: "TestClass".to_string(),
+                qualified_name: None,
+                context: None,
+            }],
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ReferencesResult = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.count, 1);
+        assert_eq!(parsed.references.len(), 1);
+    }
+
+    #[test]
+    fn test_callgraph_result_serialization() {
+        let result = CallGraphResult {
+            center: SymbolInfo {
+                name: "main".to_string(),
+                qualified_name: Some("main.main".to_string()),
+                node_type: "function".to_string(),
+                file: "/test/main.go".to_string(),
+                line: 1,
+                column: 1,
+            },
+            callers: vec![],
+            callees: vec![SymbolInfo {
+                name: "helper".to_string(),
+                qualified_name: None,
+                node_type: "function".to_string(),
+                file: "/test/main.go".to_string(),
+                line: 20,
+                column: 1,
+            }],
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: CallGraphResult = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.center.name, "main");
+        assert_eq!(parsed.callees.len(), 1);
+    }
+
+    #[test]
+    fn test_symbol_search_result_serialization() {
+        let result = SymbolSearchResult {
+            count: 2,
+            symbols: vec![
+                SymbolInfo {
+                    name: "func1".to_string(),
+                    qualified_name: None,
+                    node_type: "function".to_string(),
+                    file: "/test.go".to_string(),
+                    line: 1,
+                    column: 1,
+                },
+                SymbolInfo {
+                    name: "func2".to_string(),
+                    qualified_name: None,
+                    node_type: "function".to_string(),
+                    file: "/test.go".to_string(),
+                    line: 10,
+                    column: 1,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: SymbolSearchResult = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.count, 2);
+        assert_eq!(parsed.symbols.len(), 2);
+    }
+
+    #[test]
+    fn test_find_definition_by_symbol() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let db = Database::open(&db_path).unwrap();
+        db.init_schema().unwrap();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/Service.java", "java");
+        create_test_node(&db, file_id, "class", "UserService", Some("com.example.UserService"), 1);
+        drop(db);
+
+        let result = find_definition_by_symbol(&db_path, project_id, "UserService").unwrap();
+
+        assert!(result.found);
+        let def = result.definition.unwrap();
+        assert_eq!(def.name, "UserService");
+    }
+
+    #[test]
+    fn test_find_references_by_symbol() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let db = Database::open(&db_path).unwrap();
+        db.init_schema().unwrap();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/Service.java", "java");
+
+        let method_id = create_test_node(&db, file_id, "method", "getUser", Some("UserService.getUser"), 10);
+        let call_id = create_test_node(&db, file_id, "call", "getUser", None, 30);
+
+        // Create a calls edge
+        let edge = EdgeRecord {
+            id: 0,
+            source_id: call_id,
+            target_id: method_id,
+            edge_type: "calls".to_string(),
+            attributes: None,
+        };
+        db.insert_edge(&edge).unwrap();
+        drop(db);
+
+        let result = find_references_by_symbol(&db_path, project_id, "getUser", 10).unwrap();
+
+        assert!(result.count >= 1);
+    }
+
+    #[test]
+    fn test_standalone_find_definition() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let db = Database::open(&db_path).unwrap();
+        db.init_schema().unwrap();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/file.java", "java");
+        create_test_node(&db, file_id, "class", "Test", None, 1);
+        drop(db);
+
+        let result = find_definition(&db_path, Path::new("/test/file.java"), 3, 1).unwrap();
+        assert!(result.found);
+    }
+
+    #[test]
+    fn test_standalone_search_symbols() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let db = Database::open(&db_path).unwrap();
+        db.init_schema().unwrap();
+        let project_id = create_test_project(&db);
+        let file_id = create_test_file(&db, project_id, "/test/file.java", "java");
+        create_test_node(&db, file_id, "class", "TestClass", None, 1);
+        drop(db);
+
+        let result = search_symbols(&db_path, "Test", None, 10).unwrap();
+        assert!(result.count > 0);
+    }
+}

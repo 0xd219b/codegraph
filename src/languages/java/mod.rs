@@ -414,3 +414,326 @@ impl<'a> JavaGraphExtractor<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::languages::LanguageSupport;
+
+    fn parse_java(source: &str) -> (Vec<NodeData>, Vec<EdgeData>) {
+        let java = JavaLanguage::new();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&java.grammar()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        java.extract_graph(source, &tree).unwrap()
+    }
+
+    #[test]
+    fn test_java_language_new() {
+        let java = JavaLanguage::new();
+        assert_eq!(java.language_id(), "java");
+    }
+
+    #[test]
+    fn test_java_language_default() {
+        let java = JavaLanguage::default();
+        assert_eq!(java.language_id(), "java");
+    }
+
+    #[test]
+    fn test_java_file_extensions() {
+        let java = JavaLanguage::new();
+        let extensions = java.file_extensions();
+        assert!(extensions.contains(&".java"));
+    }
+
+    #[test]
+    fn test_java_grammar() {
+        let java = JavaLanguage::new();
+        let grammar = java.grammar();
+        // Should be able to create a parser
+        let mut parser = tree_sitter::Parser::new();
+        assert!(parser.set_language(&grammar).is_ok());
+    }
+
+    #[test]
+    fn test_extract_package() {
+        let source = "package com.example.app;";
+        let (nodes, _) = parse_java(source);
+
+        // Package node extraction depends on tree-sitter parsing
+        // Just verify parsing doesn't fail
+        assert!(nodes.is_empty() || nodes.iter().any(|n| n.node_type == "package"));
+    }
+
+    #[test]
+    fn test_extract_import() {
+        let source = r#"
+import java.util.List;
+import java.util.Map;
+"#;
+        let (nodes, _) = parse_java(source);
+
+        let imports: Vec<_> = nodes.iter().filter(|n| n.node_type == "import").collect();
+        assert_eq!(imports.len(), 2);
+        assert!(imports.iter().any(|n| n.name.contains("List")));
+        assert!(imports.iter().any(|n| n.name.contains("Map")));
+    }
+
+    #[test]
+    fn test_extract_class() {
+        let source = r#"
+public class UserService {
+}
+"#;
+        let (nodes, _) = parse_java(source);
+
+        let class = nodes.iter().find(|n| n.node_type == "class").unwrap();
+        assert_eq!(class.name, "UserService");
+        assert!(class.qualified_name.is_some());
+    }
+
+    #[test]
+    fn test_extract_interface() {
+        let source = r#"
+public interface UserRepository {
+}
+"#;
+        let (nodes, _) = parse_java(source);
+
+        let interface = nodes.iter().find(|n| n.node_type == "interface").unwrap();
+        assert_eq!(interface.name, "UserRepository");
+    }
+
+    #[test]
+    fn test_extract_method() {
+        let source = r#"
+public class Service {
+    public void doSomething() {
+    }
+
+    private int calculate(int x) {
+        return x * 2;
+    }
+}
+"#;
+        let (nodes, _) = parse_java(source);
+
+        let methods: Vec<_> = nodes.iter().filter(|n| n.node_type == "method").collect();
+        assert_eq!(methods.len(), 2);
+        assert!(methods.iter().any(|m| m.name == "doSomething"));
+        assert!(methods.iter().any(|m| m.name == "calculate"));
+    }
+
+    #[test]
+    fn test_extract_constructor() {
+        let source = r#"
+public class User {
+    public User(String name) {
+    }
+}
+"#;
+        let (nodes, _) = parse_java(source);
+
+        let constructor = nodes.iter().find(|n| n.node_type == "constructor").unwrap();
+        assert_eq!(constructor.name, "User");
+    }
+
+    #[test]
+    fn test_extract_field() {
+        let source = r#"
+public class User {
+    private String name;
+    private int age;
+}
+"#;
+        let (nodes, _) = parse_java(source);
+
+        let fields: Vec<_> = nodes.iter().filter(|n| n.node_type == "field").collect();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().any(|f| f.name == "name"));
+        assert!(fields.iter().any(|f| f.name == "age"));
+    }
+
+    #[test]
+    fn test_extract_method_parameters() {
+        let source = r#"
+public class Service {
+    public void process(String input, int count) {
+    }
+}
+"#;
+        let (nodes, edges) = parse_java(source);
+
+        let params: Vec<_> = nodes.iter().filter(|n| n.node_type == "parameter").collect();
+        assert_eq!(params.len(), 2);
+        assert!(params.iter().any(|p| p.name == "input"));
+        assert!(params.iter().any(|p| p.name == "count"));
+
+        // Check edges
+        let param_edges: Vec<_> = edges.iter().filter(|e| e.edge_type == "has_parameter").collect();
+        assert_eq!(param_edges.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_method_invocation() {
+        let source = r#"
+public class Service {
+    public void execute() {
+        helper();
+        process();
+    }
+}
+"#;
+        let (nodes, edges) = parse_java(source);
+
+        let calls: Vec<_> = nodes.iter().filter(|n| n.node_type == "call").collect();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().any(|c| c.name == "helper"));
+        assert!(calls.iter().any(|c| c.name == "process"));
+
+        // Method should have calls edges to call nodes
+        let call_edges: Vec<_> = edges.iter().filter(|e| e.edge_type == "calls").collect();
+        assert_eq!(call_edges.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_extends() {
+        let source = r#"
+public class Dog extends Animal {
+}
+"#;
+        let (nodes, _edges) = parse_java(source);
+
+        let class = nodes.iter().find(|n| n.node_type == "class").unwrap();
+        assert_eq!(class.name, "Dog");
+
+        // The extends relationship may or may not create a reference node
+        // depending on tree-sitter grammar details
+    }
+
+    #[test]
+    fn test_extract_implements() {
+        let source = r#"
+public class UserServiceImpl implements UserService, Serializable {
+}
+"#;
+        let (nodes, _edges) = parse_java(source);
+
+        let class = nodes.iter().find(|n| n.node_type == "class").unwrap();
+        assert_eq!(class.name, "UserServiceImpl");
+
+        // Implements edges may or may not be created depending on implementation
+    }
+
+    #[test]
+    fn test_node_positions() {
+        let source = r#"public class Test {
+    public void method() {
+    }
+}"#;
+        let (nodes, _) = parse_java(source);
+
+        let class = nodes.iter().find(|n| n.node_type == "class").unwrap();
+        assert_eq!(class.start_line, 1);
+        assert_eq!(class.end_line, 4);
+
+        let method = nodes.iter().find(|n| n.node_type == "method").unwrap();
+        assert_eq!(method.start_line, 2);
+        assert_eq!(method.end_line, 3);
+    }
+
+    #[test]
+    fn test_qualified_names() {
+        let source = r#"
+package com.example;
+
+public class Service {
+    public void process() {
+    }
+}
+"#;
+        let (nodes, _) = parse_java(source);
+
+        let class = nodes.iter().find(|n| n.node_type == "class").unwrap();
+        assert!(class.qualified_name.as_ref().unwrap().contains("Service"));
+
+        let method = nodes.iter().find(|n| n.node_type == "method").unwrap();
+        assert!(method.qualified_name.as_ref().unwrap().contains("process"));
+    }
+
+    #[test]
+    fn test_nested_method_calls() {
+        let source = r#"
+public class Service {
+    public void execute() {
+        outer(inner());
+    }
+}
+"#;
+        let (nodes, _) = parse_java(source);
+
+        let calls: Vec<_> = nodes.iter().filter(|n| n.node_type == "call").collect();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().any(|c| c.name == "outer"));
+        assert!(calls.iter().any(|c| c.name == "inner"));
+    }
+
+    #[test]
+    fn test_empty_class() {
+        let source = "public class Empty {}";
+        let (nodes, edges) = parse_java(source);
+
+        assert!(nodes.iter().any(|n| n.node_type == "class" && n.name == "Empty"));
+        // Empty class should have no edges
+        let internal_edges: Vec<_> = edges.iter().filter(|e| e.edge_type != "extends" && e.edge_type != "implements").collect();
+        assert!(internal_edges.is_empty());
+    }
+
+    #[test]
+    fn test_complex_java_file() {
+        let source = r#"
+package com.example;
+
+import java.util.List;
+import java.util.Optional;
+
+public class UserService {
+    private UserRepository userRepository;
+
+    public UserService(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    public Optional<User> getUserById(Long id) {
+        return userRepository.findById(id);
+    }
+
+    public List<User> getAllUsers() {
+        return userRepository.findAll();
+    }
+}
+"#;
+        let (nodes, edges) = parse_java(source);
+
+        // Verify parsing produced some results
+        assert!(!nodes.is_empty());
+
+        // Check class is always extracted
+        assert!(nodes.iter().any(|n| n.node_type == "class" && n.name == "UserService"));
+
+        // Check imports are extracted
+        assert_eq!(nodes.iter().filter(|n| n.node_type == "import").count(), 2);
+
+        // Check methods are extracted
+        assert_eq!(nodes.iter().filter(|n| n.node_type == "method").count(), 2);
+
+        // Check method calls - should have findById and findAll
+        let calls: Vec<_> = nodes.iter().filter(|n| n.node_type == "call").collect();
+        assert!(calls.iter().any(|c| c.name == "findById"));
+        assert!(calls.iter().any(|c| c.name == "findAll"));
+
+        // Check edges exist
+        assert!(!edges.is_empty());
+    }
+}

@@ -69,10 +69,131 @@ impl LanguageRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::languages::java::JavaLanguage;
+    use crate::languages::go::GoLanguage;
 
     #[test]
     fn test_empty_registry() {
         let registry = LanguageRegistry::empty();
         assert!(registry.language_ids().is_empty());
+    }
+
+    #[test]
+    fn test_register_language() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(JavaLanguage::new()));
+
+        let ids = registry.language_ids();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&"java"));
+    }
+
+    #[test]
+    fn test_register_multiple_languages() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(JavaLanguage::new()));
+        registry.register(Arc::new(GoLanguage::new()));
+
+        let ids = registry.language_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"java"));
+        assert!(ids.contains(&"go"));
+    }
+
+    #[test]
+    fn test_get_by_id() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(JavaLanguage::new()));
+
+        let lang = registry.get("java");
+        assert!(lang.is_some());
+        assert_eq!(lang.unwrap().language_id(), "java");
+    }
+
+    #[test]
+    fn test_get_by_id_not_found() {
+        let registry = LanguageRegistry::empty();
+        let lang = registry.get("python");
+        assert!(lang.is_none());
+    }
+
+    #[test]
+    fn test_get_by_extension_with_dot() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(JavaLanguage::new()));
+
+        let lang = registry.get_by_extension(".java");
+        assert!(lang.is_some());
+        assert_eq!(lang.unwrap().language_id(), "java");
+    }
+
+    #[test]
+    fn test_get_by_extension_without_dot() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(GoLanguage::new()));
+
+        let lang = registry.get_by_extension("go");
+        assert!(lang.is_some());
+        assert_eq!(lang.unwrap().language_id(), "go");
+    }
+
+    #[test]
+    fn test_get_by_extension_not_found() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(JavaLanguage::new()));
+
+        let lang = registry.get_by_extension(".py");
+        assert!(lang.is_none());
+    }
+
+    #[test]
+    fn test_is_supported() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(JavaLanguage::new()));
+
+        assert!(registry.is_supported(".java"));
+        assert!(registry.is_supported("java"));
+        assert!(!registry.is_supported(".py"));
+        assert!(!registry.is_supported("python"));
+    }
+
+    #[test]
+    fn test_list_languages() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(JavaLanguage::new()));
+        registry.register(Arc::new(GoLanguage::new()));
+
+        let languages = registry.list_languages();
+        assert_eq!(languages.len(), 2);
+    }
+
+    #[test]
+    fn test_extension_map() {
+        let mut registry = LanguageRegistry::empty();
+        registry.register(Arc::new(JavaLanguage::new()));
+
+        // Verify extension mapping works
+        assert!(registry.extension_map.contains_key(".java"));
+        assert_eq!(registry.extension_map.get(".java"), Some(&"java".to_string()));
+    }
+
+    #[test]
+    fn test_language_extensions() {
+        let java = JavaLanguage::new();
+        assert!(java.file_extensions().contains(&".java"));
+
+        let go = GoLanguage::new();
+        assert!(go.file_extensions().contains(&".go"));
+    }
+
+    #[test]
+    fn test_language_grammar() {
+        let java = JavaLanguage::new();
+        let _grammar = java.grammar();
+        // Grammar should be valid (no panic)
+
+        let go = GoLanguage::new();
+        let _grammar = go.grammar();
+        // Grammar should be valid (no panic)
     }
 }

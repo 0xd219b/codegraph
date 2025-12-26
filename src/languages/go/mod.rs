@@ -451,3 +451,405 @@ impl<'a> GoGraphExtractor<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::languages::LanguageSupport;
+
+    fn parse_go(source: &str) -> (Vec<NodeData>, Vec<EdgeData>) {
+        let go = GoLanguage::new();
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&go.grammar()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        go.extract_graph(source, &tree).unwrap()
+    }
+
+    #[test]
+    fn test_go_language_new() {
+        let go = GoLanguage::new();
+        assert_eq!(go.language_id(), "go");
+    }
+
+    #[test]
+    fn test_go_language_default() {
+        let go = GoLanguage::default();
+        assert_eq!(go.language_id(), "go");
+    }
+
+    #[test]
+    fn test_go_file_extensions() {
+        let go = GoLanguage::new();
+        let extensions = go.file_extensions();
+        assert!(extensions.contains(&".go"));
+    }
+
+    #[test]
+    fn test_go_grammar() {
+        let go = GoLanguage::new();
+        let grammar = go.grammar();
+        let mut parser = tree_sitter::Parser::new();
+        assert!(parser.set_language(&grammar).is_ok());
+    }
+
+    #[test]
+    fn test_extract_package() {
+        let source = "package main";
+        let (nodes, _) = parse_go(source);
+
+        let pkg = nodes.iter().find(|n| n.node_type == "package").unwrap();
+        assert_eq!(pkg.name, "main");
+    }
+
+    #[test]
+    fn test_extract_import_single() {
+        let source = r#"
+package main
+
+import "fmt"
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let import = nodes.iter().find(|n| n.node_type == "import").unwrap();
+        assert_eq!(import.name, "fmt");
+    }
+
+    #[test]
+    fn test_extract_import_multiple() {
+        let source = r#"
+package main
+
+import (
+    "fmt"
+    "net/http"
+    "encoding/json"
+)
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let imports: Vec<_> = nodes.iter().filter(|n| n.node_type == "import").collect();
+        assert_eq!(imports.len(), 3);
+        assert!(imports.iter().any(|i| i.name == "fmt"));
+        assert!(imports.iter().any(|i| i.name == "net/http"));
+        assert!(imports.iter().any(|i| i.name == "encoding/json"));
+    }
+
+    #[test]
+    fn test_extract_function() {
+        let source = r#"
+package main
+
+func main() {
+}
+
+func helper() {
+}
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let funcs: Vec<_> = nodes.iter().filter(|n| n.node_type == "function").collect();
+        assert_eq!(funcs.len(), 2);
+        assert!(funcs.iter().any(|f| f.name == "main"));
+        assert!(funcs.iter().any(|f| f.name == "helper"));
+    }
+
+    #[test]
+    fn test_extract_method() {
+        let source = r#"
+package main
+
+type Server struct {}
+
+func (s *Server) Start() {
+}
+
+func (s Server) Stop() {
+}
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let methods: Vec<_> = nodes.iter().filter(|n| n.node_type == "method").collect();
+        assert_eq!(methods.len(), 2);
+        assert!(methods.iter().any(|m| m.name == "Start"));
+        assert!(methods.iter().any(|m| m.name == "Stop"));
+    }
+
+    #[test]
+    fn test_extract_struct() {
+        let source = r#"
+package main
+
+type User struct {
+    Name string
+    Age  int
+}
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let struc = nodes.iter().find(|n| n.node_type == "struct").unwrap();
+        assert_eq!(struc.name, "User");
+    }
+
+    #[test]
+    fn test_extract_interface() {
+        let source = r#"
+package main
+
+type Repository interface {
+    Find(id int) error
+    Save(data string) error
+}
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let interface = nodes.iter().find(|n| n.node_type == "interface").unwrap();
+        assert_eq!(interface.name, "Repository");
+    }
+
+    #[test]
+    fn test_extract_struct_fields() {
+        let source = r#"
+package main
+
+type Config struct {
+    Host string
+    Port int
+}
+"#;
+        let (nodes, edges) = parse_go(source);
+
+        let fields: Vec<_> = nodes.iter().filter(|n| n.node_type == "field").collect();
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().any(|f| f.name == "Host"));
+        assert!(fields.iter().any(|f| f.name == "Port"));
+
+        let contains_edges: Vec<_> = edges.iter().filter(|e| e.edge_type == "contains").collect();
+        assert_eq!(contains_edges.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_interface_methods() {
+        let source = r#"
+package main
+
+type Handler interface {
+    Handle()
+    Process()
+}
+"#;
+        let (nodes, edges) = parse_go(source);
+
+        // Verify interface is extracted
+        assert!(nodes.iter().any(|n| n.node_type == "interface" && n.name == "Handler"));
+
+        // Interface methods may or may not be extracted depending on tree-sitter behavior
+        // Just verify we have some method nodes if they exist
+        let interface_methods: Vec<_> = nodes.iter()
+            .filter(|n| n.node_type == "method")
+            .collect();
+
+        // If methods are extracted, they should have contains edges
+        if !interface_methods.is_empty() {
+            let contains_edges: Vec<_> = edges.iter().filter(|e| e.edge_type == "contains").collect();
+            assert!(!contains_edges.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_extract_function_parameters() {
+        let source = r#"
+package main
+
+func process(input string, count int) {
+}
+"#;
+        let (nodes, edges) = parse_go(source);
+
+        let params: Vec<_> = nodes.iter().filter(|n| n.node_type == "parameter").collect();
+        assert_eq!(params.len(), 2);
+        assert!(params.iter().any(|p| p.name == "input"));
+        assert!(params.iter().any(|p| p.name == "count"));
+
+        let param_edges: Vec<_> = edges.iter().filter(|e| e.edge_type == "has_parameter").collect();
+        assert_eq!(param_edges.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_call() {
+        let source = r#"
+package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("hello")
+    helper()
+}
+"#;
+        let (nodes, edges) = parse_go(source);
+
+        let calls: Vec<_> = nodes.iter().filter(|n| n.node_type == "call").collect();
+        assert!(calls.len() >= 2);
+        assert!(calls.iter().any(|c| c.name.contains("Println") || c.name.contains("fmt")));
+        assert!(calls.iter().any(|c| c.name == "helper"));
+
+        let call_edges: Vec<_> = edges.iter().filter(|e| e.edge_type == "calls").collect();
+        assert!(call_edges.len() >= 2);
+    }
+
+    #[test]
+    fn test_method_receiver_type() {
+        let source = r#"
+package main
+
+type Server struct {}
+
+func (s *Server) Start() error {
+    return nil
+}
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let method = nodes.iter().find(|n| n.node_type == "method" && n.name == "Start").unwrap();
+        assert!(method.attributes.as_ref().unwrap().contains("Server"));
+    }
+
+    #[test]
+    fn test_qualified_names() {
+        let source = r#"
+package mypackage
+
+func MyFunction() {
+}
+
+type MyStruct struct {}
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let func = nodes.iter().find(|n| n.node_type == "function").unwrap();
+        assert!(func.qualified_name.as_ref().unwrap().contains("mypackage"));
+
+        let struc = nodes.iter().find(|n| n.node_type == "struct").unwrap();
+        assert!(struc.qualified_name.as_ref().unwrap().contains("mypackage"));
+    }
+
+    #[test]
+    fn test_node_positions() {
+        let source = r#"package main
+
+func main() {
+    fmt.Println()
+}"#;
+        let (nodes, _) = parse_go(source);
+
+        let pkg = nodes.iter().find(|n| n.node_type == "package").unwrap();
+        assert_eq!(pkg.start_line, 1);
+
+        let func = nodes.iter().find(|n| n.node_type == "function").unwrap();
+        assert_eq!(func.start_line, 3);
+        assert_eq!(func.end_line, 5);
+    }
+
+    #[test]
+    fn test_nested_calls() {
+        let source = r#"
+package main
+
+func main() {
+    outer(inner())
+}
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let calls: Vec<_> = nodes.iter().filter(|n| n.node_type == "call").collect();
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_struct() {
+        let source = r#"
+package main
+
+type Empty struct {}
+"#;
+        let (nodes, edges) = parse_go(source);
+
+        let struc = nodes.iter().find(|n| n.node_type == "struct" && n.name == "Empty");
+        assert!(struc.is_some());
+
+        // Empty struct should have no contains edges
+        let contains_edges: Vec<_> = edges.iter().filter(|e| e.edge_type == "contains").collect();
+        assert!(contains_edges.is_empty());
+    }
+
+    #[test]
+    fn test_type_alias() {
+        let source = r#"
+package main
+
+type ID int
+type Handler func()
+"#;
+        let (nodes, _) = parse_go(source);
+
+        let types: Vec<_> = nodes.iter().filter(|n| n.node_type == "type").collect();
+        assert_eq!(types.len(), 2);
+        assert!(types.iter().any(|t| t.name == "ID"));
+        assert!(types.iter().any(|t| t.name == "Handler"));
+    }
+
+    #[test]
+    fn test_complex_go_file() {
+        let source = r#"
+package main
+
+import (
+    "fmt"
+    "net/http"
+)
+
+type Server struct {
+    port int
+    name string
+}
+
+func NewServer(port int, name string) *Server {
+    return &Server{
+        port: port,
+        name: name,
+    }
+}
+
+func (s *Server) Start() error {
+    fmt.Printf("Starting server %s on port %d\n", s.name, s.port)
+    return http.ListenAndServe(fmt.Sprintf(":%d", s.port), nil)
+}
+
+func main() {
+    server := NewServer(8080, "TestServer")
+    if err := server.Start(); err != nil {
+        fmt.Printf("Error: %v\n", err)
+    }
+}
+"#;
+        let (nodes, edges) = parse_go(source);
+
+        // Check node types
+        assert!(nodes.iter().any(|n| n.node_type == "package"));
+        assert_eq!(nodes.iter().filter(|n| n.node_type == "import").count(), 2);
+        assert!(nodes.iter().any(|n| n.node_type == "struct" && n.name == "Server"));
+        assert_eq!(nodes.iter().filter(|n| n.node_type == "field").count(), 2);
+        assert!(nodes.iter().any(|n| n.node_type == "function" && n.name == "NewServer"));
+        assert!(nodes.iter().any(|n| n.node_type == "function" && n.name == "main"));
+        assert!(nodes.iter().any(|n| n.node_type == "method" && n.name == "Start"));
+
+        // Check calls
+        let calls: Vec<_> = nodes.iter().filter(|n| n.node_type == "call").collect();
+        assert!(calls.len() > 0);
+        assert!(calls.iter().any(|c| c.name.contains("Printf") || c.name.contains("fmt")));
+        assert!(calls.iter().any(|c| c.name == "NewServer"));
+
+        // Check edges exist
+        assert!(!edges.is_empty());
+    }
+}

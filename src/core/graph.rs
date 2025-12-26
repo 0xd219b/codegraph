@@ -158,3 +158,334 @@ impl GraphBuilder {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::models::{EdgeData, NodeData};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn setup_test_db() -> (TempDir, Database) {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schema().unwrap();
+        (temp_dir, db)
+    }
+
+    fn create_test_graph_data() -> FileGraphData {
+        let nodes = vec![
+            NodeData {
+                node_type: "class".to_string(),
+                name: "TestClass".to_string(),
+                qualified_name: Some("com.example.TestClass".to_string()),
+                start_line: 1,
+                start_column: 1,
+                end_line: 10,
+                end_column: 1,
+                attributes: None,
+            },
+            NodeData {
+                node_type: "method".to_string(),
+                name: "testMethod".to_string(),
+                qualified_name: Some("com.example.TestClass.testMethod".to_string()),
+                start_line: 3,
+                start_column: 5,
+                end_line: 8,
+                end_column: 5,
+                attributes: None,
+            },
+        ];
+
+        let edges = vec![EdgeData {
+            source_idx: 0,
+            target_idx: 1,
+            edge_type: "contains".to_string(),
+            attributes: None,
+        }];
+
+        FileGraphData {
+            nodes,
+            edges,
+            content_hash: "abc123".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_graph_builder_new() {
+        let (_temp_dir, db) = setup_test_db();
+        let builder = GraphBuilder::new(db);
+        drop(builder);
+    }
+
+    #[test]
+    fn test_create_new_project() {
+        let (temp_dir, db) = setup_test_db();
+        let builder = GraphBuilder::new(db);
+
+        let project_id = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        assert!(project_id > 0);
+    }
+
+    #[test]
+    fn test_get_existing_project() {
+        let (temp_dir, db) = setup_test_db();
+        let builder = GraphBuilder::new(db);
+
+        let project_id1 = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        let project_id2 = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        assert_eq!(project_id1, project_id2);
+    }
+
+    #[test]
+    fn test_store_file_graph() {
+        let (temp_dir, db) = setup_test_db();
+        let mut builder = GraphBuilder::new(db);
+
+        let project_id = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        let file_path = PathBuf::from("/test/TestClass.java");
+        let graph_data = create_test_graph_data();
+
+        let file_id = builder
+            .store_file_graph(project_id, &file_path, "java", graph_data)
+            .unwrap();
+
+        assert!(file_id > 0);
+    }
+
+    #[test]
+    fn test_store_file_graph_unchanged() {
+        let (temp_dir, db) = setup_test_db();
+        let mut builder = GraphBuilder::new(db);
+
+        let project_id = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        let file_path = PathBuf::from("/test/TestClass.java");
+        let graph_data1 = create_test_graph_data();
+        let graph_data2 = create_test_graph_data();
+
+        let file_id1 = builder
+            .store_file_graph(project_id, &file_path, "java", graph_data1)
+            .unwrap();
+
+        let file_id2 = builder
+            .store_file_graph(project_id, &file_path, "java", graph_data2)
+            .unwrap();
+
+        // Same file with same content hash should return same ID
+        assert_eq!(file_id1, file_id2);
+    }
+
+    #[test]
+    fn test_store_file_graph_changed() {
+        let (temp_dir, db) = setup_test_db();
+        let mut builder = GraphBuilder::new(db);
+
+        let project_id = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        let file_path = PathBuf::from("/test/TestClass.java");
+
+        let mut graph_data1 = create_test_graph_data();
+        graph_data1.content_hash = "hash1".to_string();
+
+        let mut graph_data2 = create_test_graph_data();
+        graph_data2.content_hash = "hash2".to_string();
+
+        let file_id1 = builder
+            .store_file_graph(project_id, &file_path, "java", graph_data1)
+            .unwrap();
+
+        let file_id2 = builder
+            .store_file_graph(project_id, &file_path, "java", graph_data2)
+            .unwrap();
+
+        // Both operations should succeed and return valid file IDs
+        assert!(file_id1 > 0);
+        assert!(file_id2 > 0);
+    }
+
+    #[test]
+    fn test_store_multiple_files() {
+        let (temp_dir, db) = setup_test_db();
+        let mut builder = GraphBuilder::new(db);
+
+        let project_id = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        let file1 = PathBuf::from("/test/File1.java");
+        let file2 = PathBuf::from("/test/File2.java");
+
+        let mut graph1 = create_test_graph_data();
+        graph1.content_hash = "hash1".to_string();
+
+        let mut graph2 = create_test_graph_data();
+        graph2.content_hash = "hash2".to_string();
+
+        let file_id1 = builder.store_file_graph(project_id, &file1, "java", graph1).unwrap();
+        let file_id2 = builder.store_file_graph(project_id, &file2, "java", graph2).unwrap();
+
+        assert!(file_id1 > 0);
+        assert!(file_id2 > 0);
+        assert_ne!(file_id1, file_id2);
+    }
+
+    #[test]
+    fn test_build_cross_references() {
+        let (temp_dir, db) = setup_test_db();
+        let mut builder = GraphBuilder::new(db);
+
+        let project_id = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        // Create a file with reference nodes
+        let nodes = vec![
+            NodeData {
+                node_type: "class".to_string(),
+                name: "UserService".to_string(),
+                qualified_name: Some("com.example.UserService".to_string()),
+                start_line: 1,
+                start_column: 1,
+                end_line: 10,
+                end_column: 1,
+                attributes: None,
+            },
+            NodeData {
+                node_type: "reference".to_string(),
+                name: "UserRepository".to_string(),
+                qualified_name: None,
+                start_line: 3,
+                start_column: 5,
+                end_line: 3,
+                end_column: 20,
+                attributes: None,
+            },
+        ];
+
+        let graph_data = FileGraphData {
+            nodes,
+            edges: vec![],
+            content_hash: "test_hash".to_string(),
+        };
+
+        let file_path = PathBuf::from("/test/UserService.java");
+        builder
+            .store_file_graph(project_id, &file_path, "java", graph_data)
+            .unwrap();
+
+        // Build cross references (should not fail even with unresolved refs)
+        let result = builder.build_cross_references(project_id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_store_graph_with_edges() {
+        let (temp_dir, db) = setup_test_db();
+        let mut builder = GraphBuilder::new(db);
+
+        let project_id = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        let nodes = vec![
+            NodeData {
+                node_type: "function".to_string(),
+                name: "main".to_string(),
+                qualified_name: Some("main.main".to_string()),
+                start_line: 1,
+                start_column: 1,
+                end_line: 10,
+                end_column: 1,
+                attributes: None,
+            },
+            NodeData {
+                node_type: "call".to_string(),
+                name: "helper".to_string(),
+                qualified_name: None,
+                start_line: 5,
+                start_column: 5,
+                end_line: 5,
+                end_column: 15,
+                attributes: None,
+            },
+        ];
+
+        let edges = vec![EdgeData {
+            source_idx: 0,
+            target_idx: 1,
+            edge_type: "calls".to_string(),
+            attributes: None,
+        }];
+
+        let graph_data = FileGraphData {
+            nodes,
+            edges,
+            content_hash: "edge_test_hash".to_string(),
+        };
+
+        let file_path = PathBuf::from("/test/main.go");
+        let file_id = builder
+            .store_file_graph(project_id, &file_path, "go", graph_data)
+            .unwrap();
+
+        assert!(file_id > 0);
+    }
+
+    #[test]
+    fn test_store_graph_with_invalid_edge_indices() {
+        let (temp_dir, db) = setup_test_db();
+        let mut builder = GraphBuilder::new(db);
+
+        let project_id = builder
+            .create_or_get_project("test-project", temp_dir.path())
+            .unwrap();
+
+        let nodes = vec![NodeData {
+            node_type: "function".to_string(),
+            name: "test".to_string(),
+            qualified_name: None,
+            start_line: 1,
+            start_column: 1,
+            end_line: 5,
+            end_column: 1,
+            attributes: None,
+        }];
+
+        // Edge with invalid indices (target_idx doesn't exist)
+        let edges = vec![EdgeData {
+            source_idx: 0,
+            target_idx: 99, // Invalid index
+            edge_type: "calls".to_string(),
+            attributes: None,
+        }];
+
+        let graph_data = FileGraphData {
+            nodes,
+            edges,
+            content_hash: "invalid_edge_hash".to_string(),
+        };
+
+        let file_path = PathBuf::from("/test/invalid.go");
+
+        // Should not fail, just skip invalid edges
+        let result = builder.store_file_graph(project_id, &file_path, "go", graph_data);
+        assert!(result.is_ok());
+    }
+}
