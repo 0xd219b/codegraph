@@ -1,0 +1,15 @@
+# CodeGraph Configuration
+
+[server]
+host = "127.0.0.1"
+port = 8080
+cors_enabled = true
+cors_origins = ["*"]
+
+[database]
+path = "codegraph.db"
+pool_size = 4
+
+[logging]
+level = "info"      # trace, debug, info, warn, error
+format = "pretty"   # pretty, json, compact

@@ -1,0 +1,37 @@
+# Rust / Cargo
+/target/
+Cargo.lock
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (keep example, ignore actual)
+config.toml
+!config.example.toml
+
+# Test artifacts
+/tmp/
+*.profraw
+*.profdata
+
+# Build cache
+.cargo/
